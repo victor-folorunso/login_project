@@ -1,29 +1,177 @@
-from fastapi import FastAPI
-from APP.routes.signup_router import SIGNUP_ROUTER
-from APP.routes.rootpage_router import ROOTPAGE_ROUTER
-from APP.routes.login_router import LOGIN_ROUTER
-from APP.routes.homepage_router import HOMEPAGE_ROUTER
-from APP.admin_routes.showusers_router import SHOWUSERS_ROUTER
-from APP.admin_routes.deleteall_users_router import DELETEALL_USERS_ROUTER
-from APP.routes.verify_otp import VERIFY_OTP_ROUTER
+from datetime import timedelta, timezone
+from logging.handlers import RotatingFileHandler
+from fastapi import Depends, FastAPI, HTTPException
+from prisma import Prisma
+import logging
+from .models import *
+from .functions import *
 
-
+log_handler = RotatingFileHandler("error.log",maxBytes=2048)
+logging.basicConfig(
+    level=logging.ERROR,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[log_handler]
+)
 app = FastAPI(
-    debug = False,
+    debug=False,
     title="login project API",
     version="0.0.1",
     description="This is a full login / sign up API with advanced features and security without sacrificing code simplicity.\nIt is built using fastapi at its core,uvicorn, mysql, and python prisma ORM.\n\nIt is supposed to be a reusable code and serves as part of larger projects.",
 )
+db = Prisma()
 
-all_routes = [
-    SIGNUP_ROUTER,
-    ROOTPAGE_ROUTER,
-    LOGIN_ROUTER,
-    HOMEPAGE_ROUTER,
-    VERIFY_OTP_ROUTER,
-    SHOWUSERS_ROUTER,
-    DELETEALL_USERS_ROUTER,
-]
 
-for route in all_routes:
-    app.include_router(route)
+@app.delete("/admin/delete_all_users")
+async def delete_all_users():
+    try:
+        await db.connect()
+        await db.user.delete_many()
+    except Exception as e:
+        logging.error(e)
+        raise HTTPException(status_code=401)
+
+    finally:
+        await db.disconnect()
+
+
+@app.get("/admin/show_all_users")
+async def show_all_users():
+    try:
+        await db.connect()
+        users = await db.user.find_many()
+        return users
+    except Exception as e:
+        logging.error(e)
+        raise HTTPException(status_code=401)
+    finally:
+        await db.disconnect()
+
+
+@app.get("/homepage")
+async def homepage(current_user: str = Depends(validate_jwt)):
+    return "homepage. current user is " + current_user
+
+
+@app.post("/login")
+async def login(user_details: User_Detail_Model):
+    try:
+        await db.connect()
+        user = await db.user.find_unique(where={"email": user_details.email})
+        if not user:
+            raise HTTPException(status_code=400, detail="Incorrect Email or password")
+
+        if not verify_password(user_details.password, user.password):
+            raise HTTPException(status_code=400, detail="Incorrect Email or password")
+
+        if not (user.email_verified):
+            otp_secret = user.otp_secret
+            otp = send_email_confirmation_link(user_details.email, otp_secret)
+
+            await db.user.update(
+                where={"id": user.id},
+                data={"otp": otp},
+            )
+            message = f"email not verified. a confirmation mail has been sent to {user_details.email}"
+            raise HTTPException(status_code=401, detail=message)
+
+        expire_time = datetime.now(timezone.utc) + timedelta(days=7)
+        token = create_access_token({"sub": user.email}, expire_time)
+        return {"access_token": token, "token_type": "bearer"}
+
+    except Exception as e:
+        logging.error(e)
+        raise HTTPException(status_code=401)
+    finally:
+        await db.disconnect()
+
+
+@app.post("/reset_password")
+async def reset_password(otp_details: Reset_Password_Model):
+    email = otp_details.email
+    try:
+        await db.connect()
+        selected_user = await db.user.find_unique(where={"email": email})
+        otp = selected_user.otp
+        key = selected_user.otp_secret
+
+        totp = pyotp.TOTP(key, digits=8, interval=600)
+        if totp.verify(otp):
+            await db.user.update(
+                where={"id": selected_user.id},
+                data={"email_verified": True},
+            )
+            return "your email has successfully been verified"
+        raise HTTPException(status_code=401, detail="invalid or expired otp")
+    except Exception as e:
+        logging.error(e)
+        raise HTTPException(status_code=401)
+
+    finally:
+        await db.disconnect()
+
+
+@app.get("/")
+async def read_root():
+    return {"message": "Welcome to the API"}
+
+
+@app.post("/sign_up")
+async def sign_up(user_details: User_Detail_Model):
+    email = user_details.email
+    try:
+        await db.connect()
+
+        existing_user = await db.user.find_unique(where={"email": email})
+        if existing_user:
+            raise HTTPException(status_code=400, detail="Email already registered")
+
+        otp_secret = gen_otp_secret()
+        otp = send_email_confirmation_link(email, otp_secret)
+        hashed_pswd = hash_password(user_details.password)
+
+        await db.user.create(
+            data={
+                "email": email,
+                "password": hashed_pswd,
+                "otp": otp,
+                "otp_secret": otp_secret,
+            }
+        )
+
+        text = f"a confirmation link has been sent to {email}. click on it to activate your account"
+        return {"message": text}
+
+    except Exception as e:
+        logging.error(e)
+        raise HTTPException(status_code=401)
+    finally:
+        await db.disconnect()
+
+
+@app.post("/verify_email")
+async def verify_email(otp_details: Verify_Email_Model):
+    email = otp_details.email
+    try:
+        await db.connect()
+        selected_user = await db.user.find_unique(where={"email": email})
+        otp = selected_user.otp
+        key = selected_user.otp_secret
+
+        totp = pyotp.TOTP(key, digits=8, interval=600)
+        if totp.verify(otp):
+            await db.user.update(
+                where={"id": selected_user.id},
+                data={"email_verified": True},
+            )
+            return "your email has successfully been verified"
+        raise HTTPException(status_code=401, detail="invalid or expired otp")
+    except Exception as e:
+        logging.error(e)
+        raise HTTPException(status_code=401)
+    finally:
+        await db.disconnect()
+
+
+
+
+
