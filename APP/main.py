@@ -218,7 +218,7 @@ async def sign_up(user_details: User_Detail_Model):
                 "password": hashed_pswd,
                 "otp": otp,
                 "otp_secret": otp_secret,
-                "role": "admin"
+                "role": "user"
             }
         )
 
@@ -238,4 +238,6 @@ async def read_root():
 @app.get("/homepage")
 async def homepage(current_user: str = Depends(validate_jwt)):
     return "homepage. current user is " + current_user
+
+
 
