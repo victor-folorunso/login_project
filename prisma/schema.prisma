@@ -21,4 +21,5 @@ model User {
   email_verified Boolean @default(false)
   otp String
   otp_secret String
+  role String
 }

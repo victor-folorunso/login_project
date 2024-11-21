@@ -20,24 +20,33 @@ app = FastAPI(
 )
 db = Prisma()
 
-
-@app.delete("/admin/delete_all_users")
-async def delete_all_users():
+@app.post("/admin/show_all_users")
+async def show_all_users(user_details: User_Detail_Model):
+    email = user_details.email
     try:
         await db.connect()
-        await db.user.delete_many()
-    except Exception as e:
-        logging.error(e)
-        raise HTTPException(status_code=401)
+        current_user = await db.user.find_unique(where={"email": email})
+       
+        if current_user.role != "admin":
+            logging.error("403 (forbidden). Admin priviledge required to access this endpoint")
+            raise HTTPException(status_code=403)  
+        if not  current_user:
+            raise HTTPException(status_code=400, detail="Incorrect Email or password")
 
-    finally:
-        await db.disconnect()
+        if not verify_password(user_details.password, current_user.password):
+            raise HTTPException(status_code=400, detail="Incorrect Email or password")
 
+        if not (current_user.email_verified):
+            otp_secret = current_user.otp_secret
+            otp = send_email_confirmation_link(user_details.email, otp_secret)
 
-@app.get("/admin/show_all_users")
-async def show_all_users():
-    try:
-        await db.connect()
+            await db.user.update(
+                where={"id": current_user.id},
+                data={"otp": otp},
+            )
+            message = f"email not verified. a confirmation mail has been sent to {user_details.email}"
+            raise HTTPException(status_code=401, detail=message)
+
         users = await db.user.find_many()
         return users
     except Exception as e:
@@ -46,11 +55,116 @@ async def show_all_users():
     finally:
         await db.disconnect()
 
+@app.post("/admin/delete_all_users")
+async def delete_all_users(user_details: User_Detail_Model):
+    email = user_details.email
+    try:
+        await db.connect()
+        current_user = await db.user.find_unique(where={"email": email})
+       
+        if current_user.role != "admin":
+            logging.error("403 (forbidden). Admin priviledge required to access this endpoint")
+            raise HTTPException(status_code=403)  
+        if not  current_user:
+            raise HTTPException(status_code=400, detail="Incorrect Email or password")
 
-@app.get("/homepage")
-async def homepage(current_user: str = Depends(validate_jwt)):
-    return "homepage. current user is " + current_user
+        if not verify_password(user_details.password, current_user.password):
+            raise HTTPException(status_code=400, detail="Incorrect Email or password")
 
+        if not (current_user.email_verified):
+            otp_secret = current_user.otp_secret
+            otp = send_email_confirmation_link(user_details.email, otp_secret)
+
+            await db.user.update(
+                where={"id": current_user.id},
+                data={"otp": otp},
+            )
+            message = f"email not verified. a confirmation mail has been sent to {user_details.email}"
+            raise HTTPException(status_code=401, detail=message)
+
+        await db.user.delete_many()
+        return "deleted all users"
+    except Exception as e:
+        logging.error(e)
+        raise HTTPException(status_code=401)
+    finally:
+        await db.disconnect()
+
+@app.post("/verify_email")
+async def verify_email(otp_details: Verify_Email_Model):
+    email = otp_details.email
+    try:
+        await db.connect()
+        selected_user = await db.user.find_unique(where={"email": email})
+
+        if not selected_user:
+            raise HTTPException(status_code=400, detail="Incorrect Email or password")
+
+        if not (selected_user.email_verified):
+            otp_secret = selected_user.otp_secret
+            otp = send_email_confirmation_link(otp_details.email, otp_secret)
+
+            await db.user.update(
+                where={"id": selected_user.id},
+                data={"otp": otp},
+            )
+            message = f"email not verified. a confirmation mail has been sent to {selected_user.email}"
+            raise HTTPException(status_code=401, detail=message)
+           
+        
+        otp = selected_user.otp
+        key = selected_user.otp_secret
+
+        totp = pyotp.TOTP(key, digits=8, interval=600)
+        if totp.verify(otp):
+            await db.user.update(
+                where={"id": selected_user.id},
+                data={"email_verified": True},
+            )
+            return "your email has successfully been verified"
+        raise HTTPException(status_code=401, detail="invalid or expired otp")
+    except Exception as e:
+        logging.error(e)
+        raise HTTPException(status_code=401)
+    finally:
+        await db.disconnect()
+
+@app.post("/reset_password")
+async def reset_password(reset_password_details: Reset_Password_Model):
+    email = reset_password_details.email
+    try:
+        await db.connect()
+        selected_user = await db.user.find_unique(where={"email": email})
+        if not selected_user:
+            raise HTTPException(status_code=400, detail="Incorrect Email or password")
+
+        if not (selected_user.email_verified):
+            otp_secret = selected_user.otp_secret
+            otp = send_email_confirmation_link(reset_password_details.email, otp_secret)
+
+            await db.user.update(
+                where={"id": selected_user.id},
+                data={"otp": otp},
+            )
+            message = f"email not verified. a confirmation mail has been sent to {selected_user.email}"
+            raise HTTPException(status_code=401, detail=message)
+        
+        otp = selected_user.otp
+        key = selected_user.otp_secret
+
+        totp = pyotp.TOTP(key, digits=8, interval=600)
+        if totp.verify(otp):
+            hashed_pswd = hash_password(reset_password_details.new_password)
+            await db.user.update(
+                where={"id": selected_user.id},
+                data={ "password": hashed_pswd,},
+            )
+    except Exception as e:
+        logging.error(e)
+        raise HTTPException(status_code=401)
+
+    finally:
+        await db.disconnect()
 
 @app.post("/login")
 async def login(user_details: User_Detail_Model):
@@ -84,37 +198,6 @@ async def login(user_details: User_Detail_Model):
     finally:
         await db.disconnect()
 
-
-@app.post("/reset_password")
-async def reset_password(otp_details: Reset_Password_Model):
-    email = otp_details.email
-    try:
-        await db.connect()
-        selected_user = await db.user.find_unique(where={"email": email})
-        otp = selected_user.otp
-        key = selected_user.otp_secret
-
-        totp = pyotp.TOTP(key, digits=8, interval=600)
-        if totp.verify(otp):
-            await db.user.update(
-                where={"id": selected_user.id},
-                data={"email_verified": True},
-            )
-            return "your email has successfully been verified"
-        raise HTTPException(status_code=401, detail="invalid or expired otp")
-    except Exception as e:
-        logging.error(e)
-        raise HTTPException(status_code=401)
-
-    finally:
-        await db.disconnect()
-
-
-@app.get("/")
-async def read_root():
-    return {"message": "Welcome to the API"}
-
-
 @app.post("/sign_up")
 async def sign_up(user_details: User_Detail_Model):
     email = user_details.email
@@ -135,6 +218,7 @@ async def sign_up(user_details: User_Detail_Model):
                 "password": hashed_pswd,
                 "otp": otp,
                 "otp_secret": otp_secret,
+                "role": "admin"
             }
         )
 
@@ -147,31 +231,11 @@ async def sign_up(user_details: User_Detail_Model):
     finally:
         await db.disconnect()
 
+@app.get("/")
+async def read_root():
+    return {"message": "Welcome to the API"}
 
-@app.post("/verify_email")
-async def verify_email(otp_details: Verify_Email_Model):
-    email = otp_details.email
-    try:
-        await db.connect()
-        selected_user = await db.user.find_unique(where={"email": email})
-        otp = selected_user.otp
-        key = selected_user.otp_secret
-
-        totp = pyotp.TOTP(key, digits=8, interval=600)
-        if totp.verify(otp):
-            await db.user.update(
-                where={"id": selected_user.id},
-                data={"email_verified": True},
-            )
-            return "your email has successfully been verified"
-        raise HTTPException(status_code=401, detail="invalid or expired otp")
-    except Exception as e:
-        logging.error(e)
-        raise HTTPException(status_code=401)
-    finally:
-        await db.disconnect()
-
-
-
-
+@app.get("/homepage")
+async def homepage(current_user: str = Depends(validate_jwt)):
+    return "homepage. current user is " + current_user
 

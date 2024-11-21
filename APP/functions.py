@@ -1,3 +1,4 @@
+
 from dotenv import load_dotenv
 from fastapi import HTTPException
 from passlib.context import CryptContext
@@ -91,3 +92,5 @@ async def validate_jwt(token: str):
         return email
     except JWTError:
         raise credentials_exception
+    
+ 
